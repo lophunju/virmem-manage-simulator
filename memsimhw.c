@@ -55,7 +55,18 @@ void checkFrameList(){
     puts("traverse end");
 }
 
-void FIFO(struct procEntry* procTable, int pid, int vpn){
+void checkFrameListRev(){
+    int i;
+    struct frameEntry* temp = &frameHead;
+    puts("rev traverse start");
+    while(temp->prev != &frameHead){
+        printf("fid,vpn : %d, %x\n", (temp->prev)->fid, (temp->prev)->vpnFrom);
+        temp = temp->prev;
+    }
+    puts("rev traverse end");
+}
+
+void replaceFirst(struct procEntry* procTable, int pid, int vpn){
 
     struct frameEntry* temp;
     
@@ -79,13 +90,10 @@ void FIFO(struct procEntry* procTable, int pid, int vpn){
     temp->next = &frameHead; // temp get attached to tail
 }
 
-void LRU(){
-
-}
-
 void oneLevelVMSim(int replace_type, int nFrame, int numProcess, struct procEntry* procTable) {
     int i;
     int nMapped;
+    int targetFid;
 
     unsigned addr;
     unsigned vpn;
@@ -94,10 +102,6 @@ void oneLevelVMSim(int replace_type, int nFrame, int numProcess, struct procEntr
     struct frameEntry* temp;
 
     struct frameEntry* frames = (struct frameEntry*)malloc(sizeof(struct frameEntry) * nFrame);
-    frameHead.next = &frames[0];
-    frameHead.prev = &frames[0];
-    frames[0].prev = &frameHead;
-    frames[0].next = &frameHead;
 
     nMapped = 0;
     i=0;
@@ -106,17 +110,25 @@ void oneLevelVMSim(int replace_type, int nFrame, int numProcess, struct procEntr
         if (fscanf(procTable[i].tracefp, "%x %c", &addr, &rw) == EOF)
             break;
 
-        vpn = addr/4096;    // first 20 bit of full address
+        vpn = addr/4096;    // first 20 bit of 32bit full virtual address
         if (nMapped < nFrame && (procTable[i].firstLevelPageTable)[vpn].frame == NULL){    // before frame fully mapped
             frames[nMapped].fid = nMapped;
             frames[nMapped].pid = i;
 
-            temp = frameHead.prev; // tail
-            frameHead.prev = &frames[nMapped]; // new tail
-            temp->next = &frames[nMapped];
-            frames[nMapped].prev = temp;
-            frames[nMapped].next = &frameHead;
-            frames[nMapped].vpnFrom = vpn;
+            if (nMapped == 0){
+                frameHead.next = &frames[0];
+                frameHead.prev = &frames[0];
+                frames[0].prev = &frameHead;
+                frames[0].next = &frameHead;
+                frames[0].vpnFrom = vpn;
+            } else {
+                temp = frameHead.prev; // tail
+                frameHead.prev = &frames[nMapped]; // new tail
+                temp->next = &frames[nMapped];
+                frames[nMapped].prev = temp;
+                frames[nMapped].next = &frameHead;
+                frames[nMapped].vpnFrom = vpn;
+            }
 
             (procTable[i].firstLevelPageTable)[vpn].frame = &frames[nMapped];
             (procTable[i].firstLevelPageTable)[vpn].valid = 1;
@@ -128,26 +140,32 @@ void oneLevelVMSim(int replace_type, int nFrame, int numProcess, struct procEntr
             // for debugging
             // printf("process: %d, vpn: %x, valid: %d\n", i, vpn, (procTable[i].firstLevelPageTable)[vpn].valid );
             if ( ((procTable[i].firstLevelPageTable)[vpn].frame != NULL) && (procTable[i].firstLevelPageTable)[vpn].valid ){ // hit
+                if (replace_type == 1){ // update frame_list order when hit access using LRU
+                    targetFid = (procTable[i].firstLevelPageTable)[vpn].frame->fid;
+                    temp = &frames[targetFid];
+
+                    (temp->prev)->next = temp->next;    // detach frame
+                    (temp->next)->prev = temp->prev;
+
+                    temp->prev = frameHead.prev;    // attach to tail
+                    temp->next = &frameHead;
+                    (frameHead.prev)->next = temp;
+                    frameHead.prev = temp;       
+                }
                 procTable[i].numPageHit++;
+
                 // for debugging
                 // printf("(vpn,fid): (%x, %d) hit\n", vpn, (procTable[i].firstLevelPageTable)[vpn].frame->fid);
             }
             else {    // fault
                 procTable[i].numPageFault++;
-                if (replace_type == 0){
-                    FIFO(procTable, i, vpn);
-                } else {
-                    LRU();
-                }
+                replaceFirst(procTable, i, vpn);
+
                 // for debugging
                 // printf("(vpn,fid): (%x, %d) fault\n", vpn, (procTable[i].firstLevelPageTable)[vpn].frame->fid);
             }
 
         }
-
-        // for debugging
-        // printf("(vpn,fid): (%x, %d)\n", vpn, (procTable[i].firstLevelPageTable)[vpn].frame->fid);
-
         procTable[i].ntraces++;
 
         i++;
@@ -156,6 +174,7 @@ void oneLevelVMSim(int replace_type, int nFrame, int numProcess, struct procEntr
 
         // for debugging
         // checkFrameList();
+        // checkFrameListRev();
     }
 
 	for(i=0; i < numProcess; i++) {
@@ -247,12 +266,12 @@ int main(int argc, char *argv[]) {
 		oneLevelVMSim(0, nFrame, numProcess, procTable);
 	}
 	
-	// if (SIM_TYPE == 1) {
-	// 	printf("=============================================================\n");
-	// 	printf("The One-Level Page Table with LRU Memory Simulation Starts .....\n");
-	// 	printf("=============================================================\n");
-	// 	oneLevelVMSim(...);
-	// }
+	if (SIM_TYPE == 1) {
+		printf("=============================================================\n");
+		printf("The One-Level Page Table with LRU Memory Simulation Starts .....\n");
+		printf("=============================================================\n");
+		oneLevelVMSim(1, nFrame, numProcess, procTable);
+	}
 	
 	// if (SIM_TYPE == 2) {
 	// 	printf("=============================================================\n");
