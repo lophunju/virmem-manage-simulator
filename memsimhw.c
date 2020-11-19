@@ -21,6 +21,7 @@ struct frameEntry {
     struct frameEntry *prev;
     struct frameEntry *next;
     int vpnFrom;    // to find PTE source and set invalid
+    int svpnFrom;
 } frameHead;
 
 struct pageTableEntry {
@@ -49,7 +50,8 @@ void checkFrameList(){
     struct frameEntry* temp = &frameHead;
     puts("traverse start");
     while(temp->next != &frameHead){
-        printf("fid,vpn : %d, %x\n", (temp->next)->fid, (temp->next)->vpnFrom);
+        // printf("fid,vpn : %d, %x\n", (temp->next)->fid, (temp->next)->vpnFrom);
+        printf("fid,vpn : %d, %x, %x\n", (temp->next)->fid, (temp->next)->vpnFrom, (temp->next)->svpnFrom);
         temp = temp->next;
     }
     puts("traverse end");
@@ -60,25 +62,43 @@ void checkFrameListRev(){
     struct frameEntry* temp = &frameHead;
     puts("rev traverse start");
     while(temp->prev != &frameHead){
-        printf("fid,vpn : %d, %x\n", (temp->prev)->fid, (temp->prev)->vpnFrom);
+        // printf("fid,vpn : %d, %x\n", (temp->prev)->fid, (temp->prev)->vpnFrom);
+        printf("fid,vpn : %d, %x, %x\n", (temp->prev)->fid, (temp->prev)->vpnFrom, (temp->prev)->svpnFrom);
         temp = temp->prev;
     }
     puts("rev traverse end");
 }
 
-void replaceFirst(struct procEntry* procTable, int pid, int vpn){
+void replaceFirst(struct procEntry* procTable, int pid, int vpn, int svpn, int type){
 
     struct frameEntry* temp;
+    struct pageTableEntry* SLPT;
     
-    (procTable[pid].firstLevelPageTable)[vpn].valid = 1;    // set PTE valid
+    if (type == 1){ // using 2nd-level page table
+        SLPT = (procTable[pid].firstLevelPageTable)[vpn].secondLevelPageTable;
+        SLPT[svpn].valid = 1;   // set PTE valid
 
-    // for debugging
-    // printf("replaced frame, vpn: %d, %x\n", frameHead.next->fid, frameHead.next->vpnFrom);
+        // for debugging
+        // printf("replaced frame, vpn: %d, %x\n", frameHead.next->fid, frameHead.next->vpnFrom);
 
-    (procTable[pid].firstLevelPageTable)[vpn].frame = frameHead.next;   // replace head frame
-    (procTable[frameHead.next->pid].firstLevelPageTable)[frameHead.next->vpnFrom].valid = 0;    // set premapped PTE invalid
-    frameHead.next->vpnFrom = vpn;
-    frameHead.next->pid = pid;
+        SLPT[svpn].frame = frameHead.next;   // replace head frame
+        ((procTable[frameHead.next->pid].firstLevelPageTable)[frameHead.next->vpnFrom].secondLevelPageTable)[frameHead.next->svpnFrom].valid = 0;    // set premapped PTE invalid
+        frameHead.next->vpnFrom = vpn;
+        frameHead.next->svpnFrom = svpn;
+        frameHead.next->pid = pid;
+
+    } else {
+
+        (procTable[pid].firstLevelPageTable)[vpn].valid = 1;    // set PTE valid
+
+        // for debugging
+        // printf("replaced frame, vpn: %d, %x\n", frameHead.next->fid, frameHead.next->vpnFrom);
+
+        (procTable[pid].firstLevelPageTable)[vpn].frame = frameHead.next;   // replace head frame
+        (procTable[frameHead.next->pid].firstLevelPageTable)[frameHead.next->vpnFrom].valid = 0;    // set premapped PTE invalid
+        frameHead.next->vpnFrom = vpn;
+        frameHead.next->pid = pid;
+    }
 
     temp = frameHead.next;
     frameHead.next = temp->next;
@@ -159,7 +179,7 @@ void oneLevelVMSim(int replace_type, int nFrame, int numProcess, struct procEntr
             }
             else {    // fault
                 procTable[i].numPageFault++;
-                replaceFirst(procTable, i, vpn);
+                replaceFirst(procTable, i, vpn, 0, 0);
 
                 // for debugging
                 // printf("(vpn,fid): (%x, %d) fault\n", vpn, (procTable[i].firstLevelPageTable)[vpn].frame->fid);
@@ -186,17 +206,114 @@ void oneLevelVMSim(int replace_type, int nFrame, int numProcess, struct procEntr
 	}
 	
 }
-// void twoLevelVMSim(...) {
-	
-// 	for(i=0; i < numProcess; i++) {
-// 		printf("**** %s *****\n",procTable[i].traceName);
-// 		printf("Proc %d Num of traces %d\n",i,procTable[i].ntraces);
-// 		printf("Proc %d Num of second level page tables allocated %d\n",i,procTable[i].num2ndLevelPageTable);
-// 		printf("Proc %d Num of Page Faults %d\n",i,procTable[i].numPageFault);
-// 		printf("Proc %d Num of Page Hit %d\n",i,procTable[i].numPageHit);
-// 		assert(procTable[i].numPageHit + procTable[i].numPageFault == procTable[i].ntraces);
-// 	}
-// }
+void twoLevelVMSim(int nFrame, int numProcess, struct procEntry* procTable, int first_level_bits) {
+    int i;
+    int nMapped;
+    int targetFid;
+    int second_level_bits = 32 - first_level_bits - 12;
+
+    unsigned addr;
+    unsigned fvpn, svpn;
+    char rw;
+
+    struct pageTableEntry* SLPT;
+    struct frameEntry* temp;
+
+    struct frameEntry* frames = (struct frameEntry*)malloc(sizeof(struct frameEntry) * nFrame);
+
+    nMapped = 0;
+    i=0;
+    while(1){
+        // puts("------------------------------------");
+        if (fscanf(procTable[i].tracefp, "%x %c", &addr, &rw) == EOF)
+            break;
+
+        fvpn = addr/(1L<<(32-first_level_bits));  // first_level_bits of 32bit full virtual address
+        svpn = (addr%(1L<<(32-first_level_bits)))/(1L<<12);  // second_level_bits of 32bit full virtual address
+        // printf("calculated --- fvpn: %x, svpn: %x\n", fvpn, svpn);
+
+        if ( (procTable[i].firstLevelPageTable)[fvpn].secondLevelPageTable == NULL ){    // make SLPT
+            (procTable[i].firstLevelPageTable)[fvpn].secondLevelPageTable = (struct pageTableEntry*)malloc(sizeof(struct pageTableEntry) * (1L<<second_level_bits));
+            procTable[i].num2ndLevelPageTable++;
+        }
+        SLPT = (procTable[i].firstLevelPageTable)[fvpn].secondLevelPageTable;
+
+        if (nMapped < nFrame && SLPT[svpn].frame == NULL){  // before frame fully mapped
+
+            frames[nMapped].fid = nMapped;
+            frames[nMapped].pid = i;
+
+            if (nMapped == 0){
+                frameHead.next = &frames[0];
+                frameHead.prev = &frames[0];
+                frames[0].prev = &frameHead;
+                frames[0].next = &frameHead;
+                frames[0].vpnFrom = fvpn;
+                frames[0].svpnFrom = svpn;
+            } else {
+                temp = frameHead.prev; // tail
+                frameHead.prev = &frames[nMapped]; // new tail
+                temp->next = &frames[nMapped];
+                frames[nMapped].prev = temp;
+                frames[nMapped].next = &frameHead;
+                frames[nMapped].vpnFrom = fvpn;
+                frames[nMapped].svpnFrom = svpn;
+            }
+
+            SLPT[svpn].frame = &frames[nMapped];
+
+            SLPT[svpn].valid = 1;
+            procTable[i].numPageFault++;
+            nMapped++;
+
+        } else {
+            // for debugging
+            // printf("process: %d, fvpn: %x, svpn: %x valid: %d\n", i, fvpn, svpn, SLPT[svpn].valid );
+            if (SLPT[svpn].frame != NULL && SLPT[svpn].valid){ // hit
+                targetFid = SLPT[svpn].frame->fid;
+                temp = &frames[targetFid];
+
+                (temp->prev)->next = temp->next;    // detach frame
+                (temp->next)->prev = temp->prev;
+
+                temp->prev = frameHead.prev;    // attach to tail
+                temp->next = &frameHead;
+                (frameHead.prev)->next = temp;
+                frameHead.prev = temp;
+
+                procTable[i].numPageHit++;
+
+                // for debugging
+                // printf("(fvpn,svpn,fid): (%x, %x, %d) hit\n", fvpn, svpn, SLPT[svpn].frame->fid);
+            } else {    // fault
+                procTable[i].numPageFault++;
+                replaceFirst(procTable, i, fvpn, svpn, 1);
+
+                // for debugging
+                // printf("(fvpn,svpn,fid): (%x, %x, %d) fault\n", fvpn, svpn, SLPT[svpn].frame->fid);
+            }
+        }
+
+        procTable[i].ntraces++;
+        i++;
+        if (i == numProcess)
+            i=0;
+
+        // for debugging
+        // checkFrameList();
+        // checkFrameListRev();
+    }
+
+	for(i=0; i < numProcess; i++) {
+		printf("**** %s *****\n",procTable[i].traceName);
+		printf("Proc %d Num of traces %d\n",i,procTable[i].ntraces);
+		printf("Proc %d Num of second level page tables allocated %d\n",i,procTable[i].num2ndLevelPageTable);
+		printf("Proc %d Num of Page Faults %d\n",i,procTable[i].numPageFault);
+		printf("Proc %d Num of Page Hit %d\n",i,procTable[i].numPageHit);
+		assert(procTable[i].numPageHit + procTable[i].numPageFault == procTable[i].ntraces);
+	}
+
+}
 
 // void invertedPageVMSim(...) {
 
@@ -273,12 +390,12 @@ int main(int argc, char *argv[]) {
 		oneLevelVMSim(1, nFrame, numProcess, procTable);
 	}
 	
-	// if (SIM_TYPE == 2) {
-	// 	printf("=============================================================\n");
-	// 	printf("The Two-Level Page Table Memory Simulation Starts .....\n");
-	// 	printf("=============================================================\n");
-	// 	twoLevelVMSim(...);
-	// }
+	if (SIM_TYPE == 2) {
+		printf("=============================================================\n");
+		printf("The Two-Level Page Table Memory Simulation Starts .....\n");
+		printf("=============================================================\n");
+		twoLevelVMSim(nFrame, numProcess, procTable, FIRST_LEVEL_BITS);
+	}
 	
 	// if (SIM_TYPE == 3) {
 	// 	printf("=============================================================\n");
