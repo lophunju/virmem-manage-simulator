@@ -22,7 +22,16 @@ struct frameEntry {
     struct frameEntry *next;
     int vpnFrom;    // to find PTE source and set invalid
     int svpnFrom;
+    struct IHTEntry* nodeFrom;
 } frameHead;
+
+struct IHTEntry {
+    int fid;
+    int pid;
+    int vpn;
+    struct IHTEntry *next;
+    struct IHTEntry *prev; 
+} *IHT;
 
 struct pageTableEntry {
     struct frameEntry *frame;
@@ -69,10 +78,11 @@ void checkFrameListRev(){
     puts("rev traverse end");
 }
 
-void replaceFirst(struct procEntry* procTable, int pid, int vpn, int svpn, int type){
+void replaceFirst(struct procEntry* procTable, int pid, int vpn, int svpn, int type, struct IHTEntry* node){
 
     struct frameEntry* temp;
     struct pageTableEntry* SLPT;
+    struct IHTEntry* IHTtemp;
     
     if (type == 1){ // using 2nd-level page table
         SLPT = (procTable[pid].firstLevelPageTable)[vpn].secondLevelPageTable;
@@ -87,6 +97,50 @@ void replaceFirst(struct procEntry* procTable, int pid, int vpn, int svpn, int t
         frameHead.next->svpnFrom = svpn;
         frameHead.next->pid = pid;
 
+    } else if (type == 2) {
+        int HTindex, nFrame;
+        nFrame = svpn;  // use empty argument space
+
+        HTindex = (node->vpn + node->pid) % nFrame;
+        
+        if (IHT[HTindex].next == NULL){ // push to empty
+            // puts("push to empty");
+            IHT[HTindex].next = node;
+            node->prev = &IHT[HTindex];
+            node->next = NULL;
+        } else {    // push (switch head)
+            // puts("switch head");
+            IHTtemp = IHT[HTindex].next;   // old head
+            // printf("old head(=temp): %x %p\n", IHTtemp->vpn, IHTtemp);
+            IHT[HTindex].next = node;   // new head
+            // printf("new head: %x %p\n", node->vpn, node);
+            node->prev = &IHT[HTindex];
+            // printf("node->prev: %x %p\n", (node->prev)->vpn, node->prev);
+            node->next = IHTtemp;
+            // printf("node->next: %x %p\n", (node->next)->vpn, node->next);
+            IHTtemp->prev = node;
+            // printf("old head prev: %x %p\n", (IHTtemp->prev)->vpn, IHTtemp->prev);
+            // printf("old head next: %p\n", IHTtemp->next);
+        }
+
+        node->fid = frameHead.next->fid;
+        
+        // remove old mapping
+        IHTtemp = frameHead.next->nodeFrom;
+        // printf("what is source node? : %x %p\n", IHTtemp->vpn, IHTtemp);
+        if (IHTtemp->next == NULL){ // if tail
+            // puts("source node was tail");
+            // printf("what was it before set next null: %x %p\n", (IHTtemp->prev)->vpn, IHTtemp->prev);
+            (IHTtemp->prev)->next = NULL;
+            free(IHTtemp);
+        } else {
+            // puts("source node was not the tail");
+            (IHTtemp->prev)->next = IHTtemp->next;
+            (IHTtemp->next)->prev = IHTtemp->prev;
+            free(IHTtemp);
+        }
+        frameHead.next->nodeFrom = node;
+        
     } else {
 
         (procTable[pid].firstLevelPageTable)[vpn].valid = 1;    // set PTE valid
@@ -179,7 +233,7 @@ void oneLevelVMSim(int replace_type, int nFrame, int numProcess, struct procEntr
             }
             else {    // fault
                 procTable[i].numPageFault++;
-                replaceFirst(procTable, i, vpn, 0, 0);
+                replaceFirst(procTable, i, vpn, 0, 0, 0);
 
                 // for debugging
                 // printf("(vpn,fid): (%x, %d) fault\n", vpn, (procTable[i].firstLevelPageTable)[vpn].frame->fid);
@@ -287,7 +341,7 @@ void twoLevelVMSim(int nFrame, int numProcess, struct procEntry* procTable, int 
                 // printf("(fvpn,svpn,fid): (%x, %x, %d) hit\n", fvpn, svpn, SLPT[svpn].frame->fid);
             } else {    // fault
                 procTable[i].numPageFault++;
-                replaceFirst(procTable, i, fvpn, svpn, 1);
+                replaceFirst(procTable, i, fvpn, svpn, 1, 0);
 
                 // for debugging
                 // printf("(fvpn,svpn,fid): (%x, %x, %d) fault\n", fvpn, svpn, SLPT[svpn].frame->fid);
@@ -315,20 +369,178 @@ void twoLevelVMSim(int nFrame, int numProcess, struct procEntry* procTable, int 
 
 }
 
-// void invertedPageVMSim(...) {
+int findNode(struct IHTEntry* IHT, int pid, int vpn, int nFrame, struct procEntry* procTable){
+    int HTindex;
+    struct IHTEntry* temp;
 
-// 	for(i=0; i < numProcess; i++) {
-// 		printf("**** %s *****\n",procTable[i].traceName);
-// 		printf("Proc %d Num of traces %d\n",i,procTable[i].ntraces);
-// 		printf("Proc %d Num of Inverted Hash Table Access Conflicts %d\n",i,procTable[i].numIHTConflictAccess);
-// 		printf("Proc %d Num of Empty Inverted Hash Table Access %d\n",i,procTable[i].numIHTNULLAccess);
-// 		printf("Proc %d Num of Non-Empty Inverted Hash Table Access %d\n",i,procTable[i].numIHTNonNULLAcess);
-// 		printf("Proc %d Num of Page Faults %d\n",i,procTable[i].numPageFault);
-// 		printf("Proc %d Num of Page Hit %d\n",i,procTable[i].numPageHit);
-// 		assert(procTable[i].numPageHit + procTable[i].numPageFault == procTable[i].ntraces);
-// 		assert(procTable[i].numIHTNULLAccess + procTable[i].numIHTNonNULLAcess == procTable[i].ntraces);
-// 	}
-// }
+    HTindex = (pid+vpn)%nFrame;
+    // printf("HTindex : %d\n", HTindex);
+    temp = &IHT[HTindex];
+
+    if(temp->next)  // if list is not empty
+        procTable[pid].numIHTNonNULLAcess++;
+    else
+        procTable[pid].numIHTNULLAccess++;
+
+    while(temp->next){  // if list is not empty, traverse list and find
+        temp = temp->next;
+        // printf("target node: pid, vpn, fid: %d %x\n",pid, vpn);
+        // printf("a node found: pid, vpn, fid: %d %x %d\n",temp->pid, temp->vpn, temp->fid);
+        procTable[pid].numIHTConflictAccess++;
+
+        if( (temp->pid == pid) && (temp->vpn == vpn) ){
+            // printf("found hitted node-> pid:%d, vpn:%x, address:%p\n", temp->pid, temp->vpn, temp);
+            return temp->fid;
+        }
+
+        // if(temp->next){ // check before step forward to next
+            // puts("next is not null");
+            // printf("what is fucking next?: %p ", temp->next);
+            // printf("%d ", (temp->next)->pid);
+            // printf("%x ", (temp->next)->vpn);
+            // printf("%d\n", (temp->next)->fid);
+        // }
+    }
+
+    return -1;   // -1 on not matched
+}
+
+void invertedPageVMSim(int nFrame, int numProcess, struct procEntry* procTable) {
+    int i;
+    int nMapped;
+    int targetFid;
+
+    unsigned addr;
+    unsigned vpn;
+    char rw;
+
+    struct frameEntry* temp;
+    struct IHTEntry* IHTtemp;
+
+    struct frameEntry* frames = (struct frameEntry*)malloc(sizeof(struct frameEntry) * nFrame);
+
+    IHT = (struct IHTEntry*)malloc(sizeof(struct IHTEntry) * nFrame);
+
+
+    nMapped = 0;
+    i=0;
+    while(1){
+        int fid;
+        int HTindex;
+        struct IHTEntry* node;
+        // puts("------------------------------------");
+        // printf("processid: %d\n", i);
+        if (fscanf(procTable[i].tracefp, "%x %c", &addr, &rw) == EOF)
+            break;
+
+        vpn = addr/4096;    // first 20 bit of 32bit full virtual address
+        // puts("0");
+        if ( (fid = findNode(IHT, i, vpn, nFrame, procTable)) == -1 && nMapped < nFrame ){    // before frame fully mapped
+            frames[nMapped].fid = nMapped;
+
+            // puts("1");
+            if (nMapped == 0){
+                frameHead.next = &frames[0];
+                frameHead.prev = &frames[0];
+                frames[0].prev = &frameHead;
+                frames[0].next = &frameHead;
+            } else {
+                temp = frameHead.prev; // tail
+                frameHead.prev = &frames[nMapped]; // new tail
+                temp->next = &frames[nMapped];
+                frames[nMapped].prev = temp;
+                frames[nMapped].next = &frameHead;
+            }
+
+            // link node with IHT
+            node = (struct IHTEntry*)malloc(sizeof(struct IHTEntry));
+            node->pid = i;
+            node->vpn = vpn;
+            // printf("new node made: %x %p\n", node->vpn, node);
+
+            HTindex = (vpn + i) % nFrame;
+            if (IHT[HTindex].next == NULL){ // push to empty
+                IHT[HTindex].next = node;
+                node->prev = &IHT[HTindex];
+                node->next = NULL;
+            } else {    // push (switch head)
+                IHTtemp = IHT[HTindex].next;   // old head
+                IHT[HTindex].next = node;   // new head
+                node->prev = &IHT[HTindex];
+                node->next = IHTtemp;
+                IHTtemp->prev = node;
+            }
+
+            frames[nMapped].nodeFrom = node;
+            node->fid = nMapped;            
+
+            procTable[i].numPageFault++;
+            // procTable[i].numIHTNULLAccess++;
+            nMapped++;
+        } else {    // after frame fully mapped
+
+            // for debugging
+            // printf("process: %d, vpn: %x, valid: %d\n", i, vpn, (procTable[i].firstLevelPageTable)[vpn].valid );
+            if (fid != -1){ // hit
+                // puts("2");
+                // update frame_list order when hit access using LRU
+                temp = &frames[fid];
+
+                (temp->prev)->next = temp->next;    // detach frame
+                (temp->next)->prev = temp->prev;
+
+                temp->prev = frameHead.prev;    // attach to tail
+                temp->next = &frameHead;
+                (frameHead.prev)->next = temp;
+                frameHead.prev = temp;
+
+                procTable[i].numPageHit++;
+                // procTable[i].numIHTNonNULLAcess++;
+                // procTable[i].numIHTConflictAccess++;
+                // for debugging
+                // printf("(vpn,fid): (%x, %d) hit\n", vpn, (procTable[i].firstLevelPageTable)[vpn].frame->fid);
+            }
+            else {    // fault
+                // puts("3");
+                node = (struct IHTEntry*)malloc(sizeof(struct IHTEntry));
+                node->pid = i;
+                node->vpn = vpn;
+                // printf("new node made: %x %p\n", node->vpn, node);
+
+                replaceFirst(procTable, i, vpn, nFrame, 2, node);
+                
+                procTable[i].numPageFault++;
+                // procTable[i].numIHTNULLAccess++;
+
+                // for debugging
+                // printf("(vpn,fid): (%x, %d) fault\n", vpn, (procTable[i].firstLevelPageTable)[vpn].frame->fid);
+            }
+
+        }
+        procTable[i].ntraces++;
+
+        i++;
+        if (i == numProcess)
+            i=0;
+
+        // for debugging
+        // checkFrameList();
+        // checkFrameListRev();
+    }
+
+
+	for(i=0; i < numProcess; i++) {
+		printf("**** %s *****\n",procTable[i].traceName);
+		printf("Proc %d Num of traces %d\n",i,procTable[i].ntraces);
+		printf("Proc %d Num of Inverted Hash Table Access Conflicts %d\n",i,procTable[i].numIHTConflictAccess);
+		printf("Proc %d Num of Empty Inverted Hash Table Access %d\n",i,procTable[i].numIHTNULLAccess);
+		printf("Proc %d Num of Non-Empty Inverted Hash Table Access %d\n",i,procTable[i].numIHTNonNULLAcess);
+		printf("Proc %d Num of Page Faults %d\n",i,procTable[i].numPageFault);
+		printf("Proc %d Num of Page Hit %d\n",i,procTable[i].numPageHit);
+		assert(procTable[i].numPageHit + procTable[i].numPageFault == procTable[i].ntraces);
+		assert(procTable[i].numIHTNULLAccess + procTable[i].numIHTNonNULLAcess == procTable[i].ntraces);
+	}
+}
 
 int main(int argc, char *argv[]) {
 	int SIM_TYPE, FIRST_LEVEL_BITS, PHYSICAL_MEMORY_SIZE_BITS;
@@ -397,12 +609,12 @@ int main(int argc, char *argv[]) {
 		twoLevelVMSim(nFrame, numProcess, procTable, FIRST_LEVEL_BITS);
 	}
 	
-	// if (SIM_TYPE == 3) {
-	// 	printf("=============================================================\n");
-	// 	printf("The Inverted Page Table Memory Simulation Starts .....\n");
-	// 	printf("=============================================================\n");
-	// 	invertedPageVMSim(...);
-	// }
+	if (SIM_TYPE == 3) {
+		printf("=============================================================\n");
+		printf("The Inverted Page Table Memory Simulation Starts .....\n");
+		printf("=============================================================\n");
+		invertedPageVMSim(nFrame, numProcess, procTable);
+	}
 
 	return(0);
 }
